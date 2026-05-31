@@ -1,0 +1,5 @@
+# Compiled binary (rebuild with `make`)
+game
+
+# macOS clutter
+.DS_Store
