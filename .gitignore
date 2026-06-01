@@ -1,5 +1,9 @@
 # Compiled binary (rebuild with `make`)
 game
 
+# Dev screenshots (from `./game --shot out.png`)
+preview.png
+crop.png
+
 # macOS clutter
 .DS_Store

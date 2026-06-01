@@ -13,7 +13,7 @@ A tiny **native** first-person shooter for macOS (Apple Silicon / arm64), writte
 | Left-click / Space | Shoot |
 | ESC | Quit |
 
-Shoot the red cubes (marked with yellow beacons). They **patrol around the arena**, so aiming takes some skill. Each hit scores a point, plays a sound, and respawns the cube elsewhere. A **gun viewmodel** sits in your view and flashes + recoils when you fire. Firing and hitting both have procedurally-generated **sound effects** (no audio files needed).
+Shoot the **beers** (frothy mugs, marked with gold beacons). They **patrol around the arena** as camera-facing billboards, so aiming takes some skill. Each hit scores a point, plays a sound, and respawns the beer elsewhere. A **shotgun viewmodel** sits in your view and flashes + recoils when you fire. Firing and hitting both have procedurally-generated **sound effects** (no audio files needed).
 
 ## Build & run
 
@@ -27,5 +27,15 @@ make run    # build + launch
 
 ## Files
 
-- `game.c` — the entire game (~280 lines, heavily commented)
+- `game.c` — the entire game (~300 lines, heavily commented)
 - `Makefile` — clang build targeting arm64, links raylib + macOS frameworks
+- `assets/` — `beer.png` (the enemy sprite) and `shotgun.png` (the viewmodel)
+
+Run the game from the project folder so it can find `assets/` (this is what
+`make run` does).
+
+## Art credits
+
+- `assets/beer.png` — [OpenMoji](https://openmoji.org) 🍺 (CC BY-SA 4.0)
+- `assets/shotgun.png` — ["2D Guns" pack](https://opengameart.org/content/2d-guns)
+  on OpenGameArt (CC0, public domain)

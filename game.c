@@ -27,8 +27,26 @@
 #define ARENA_HALF     16.0f   // Arena spans -ARENA_HALF..+ARENA_HALF on X and Z
 #define WALL_HEIGHT    4.0f
 #define WALL_THICK     1.0f
-#define ENEMY_COUNT    8       // How many target cubes exist at once
-#define ENEMY_SIZE     2.0f    // Cube edge length
+#define ENEMY_COUNT    8       // How many target beers exist at once
+#define ENEMY_SIZE     2.0f    // Billboard size / hit-box edge length
+
+// ---- Shotgun viewmodel placement (tuned by eye) ---------------------------
+// The shotgun is a side-view sprite drawn in the lower-right corner, flipped so
+// the muzzle points up-and-left toward the crosshair. These control where it
+// sits, how big it is, and how far it pivots. ANCHOR is the on-screen point the
+// gun pivots around (roughly the shooter's grip); ORIGIN is that same point in
+// the sprite's own pixel space.
+#define GUN_W          720.0f  // on-screen width of the shotgun sprite (px)
+#define GUN_ROT        (10.0f) // rotation in degrees (positive tilts muzzle up)
+#define GUN_ANCHOR_X   1000.0f // where the grip sits on screen, X
+#define GUN_ANCHOR_Y   600.0f  // where the grip sits on screen, Y
+#define GUN_ORIGIN_FX  0.60f   // pivot (grip) position within the sprite, as a
+#define GUN_ORIGIN_FY  0.58f   //   fraction of width/height (0..1)
+// Where the muzzle tip lives in the flipped sprite, as fractions of its
+// width/height (measured from the PNG: front of barrel, left edge after flip).
+// The flash is placed here via the same transform raylib uses to draw the gun.
+#define GUN_MUZZLE_FX  0.00f
+#define GUN_MUZZLE_FY  0.1207f
 
 // An enemy is a position, a velocity (so it can wander), and an alive flag.
 typedef struct Enemy {
@@ -83,10 +101,26 @@ static Sound GenTone(float startFreq, float endFreq, float seconds) {
     return snd;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    // Optional self-test: "./game --shot out.png" renders a few frames with a
+    // beer parked in front and the gun firing, saves a screenshot, then exits.
+    // Used during development to tune the viewmodel without grabbing the mouse.
+    const char *shotPath = NULL;
+    for (int i = 1; i < argc - 1; i++)
+        if (TextIsEqual(argv[i], "--shot")) shotPath = argv[i + 1];
+
     // ---- Window + camera setup --------------------------------------------
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "raylib FPS — ESC to quit");
     InitAudioDevice();    // start the audio system so we can play sound effects
+
+    // ---- Textures ---------------------------------------------------------
+    // Load after the window (textures need the GPU context). The beer mug is
+    // drawn as a billboard (a sprite that always faces the camera); the shotgun
+    // is the 2D viewmodel. Bilinear filtering keeps both smooth when scaled.
+    Texture2D beerTex    = LoadTexture("assets/beer.png");
+    Texture2D shotgunTex = LoadTexture("assets/shotgun.png");
+    SetTextureFilter(beerTex,    TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(shotgunTex, TEXTURE_FILTER_BILINEAR);
 
     // Build our two sound effects procedurally (no files to ship):
     //   shoot — a laser "pew" that slides downward in pitch
@@ -105,7 +139,8 @@ int main(void) {
 
     // Lock the mouse to the window: the cursor is hidden and recentred each
     // frame so you can spin around endlessly. ESC / EnableCursor() reverses it.
-    DisableCursor();
+    // (Skip this in screenshot mode so the test run doesn't grab the cursor.)
+    if (!shotPath) DisableCursor();
 
     SetTargetFPS(60);                 // Cap the loop at 60 fps
     srand((unsigned int)time(NULL));  // Seed RNG so spawns differ each run
@@ -123,14 +158,30 @@ int main(void) {
     Vector3 shotEnd     = { 0 };         // tracer end (the impact point)
     float   muzzleTimer = 0.0f;          // brief muzzle-flash + recoil countdown
 
+    // Screenshot mode: park a beer right in front of the camera, light up the
+    // muzzle flash, and count frames so we can grab one clean frame and quit.
+    int shotFrame = 0;
+    if (shotPath) {
+        enemies[0].position = (Vector3){ 0.0f, ENEMY_SIZE / 2.0f, 0.0f };
+        camera.position = (Vector3){ 0.0f, 2.0f, 7.0f };
+        camera.target   = (Vector3){ 0.0f, 1.5f, 0.0f };
+        muzzleTimer = 0.06f;   // show the flash
+        shotTimer   = 0.12f;
+        lastShotHit = true;
+        shotStart = Vector3Add(camera.position, (Vector3){ 0.0f, -0.3f, 0.0f });
+        shotEnd   = enemies[0].position;
+    }
+
     // ---- Main loop --------------------------------------------------------
     // WindowShouldClose() becomes true when you press ESC or close the window.
     while (!WindowShouldClose()) {
 
         // ===== 1. UPDATE ===================================================
-        UpdateCamera(&camera, CAMERA_FIRST_PERSON);
+        // In screenshot mode we freeze the camera/enemies so the frame is
+        // deterministic; otherwise drive the camera from mouse + WASD as usual.
+        if (!shotPath) UpdateCamera(&camera, CAMERA_FIRST_PERSON);
 
-        float dt = GetFrameTime();   // seconds since last frame
+        float dt = shotPath ? 0.0f : GetFrameTime();   // seconds since last frame
 
         // Tick down the shot-feedback + muzzle-flash timers using real time.
         if (shotTimer > 0.0f)   shotTimer   -= dt;
@@ -233,19 +284,18 @@ int main(void) {
                 DrawCube((Vector3){  ARENA_HALF, y, 0 }, WALL_THICK, WALL_HEIGHT, span, DARKGRAY);
                 DrawCube((Vector3){ -ARENA_HALF, y, 0 }, WALL_THICK, WALL_HEIGHT, span, DARKGRAY);
 
-                // Enemy cubes: a bright red body with a gold wireframe, plus a
-                // tall yellow "beacon" line rising out of each one so you can
-                // spot them across the arena and know which way to turn.
+                // Enemies are beers: each one is a billboard (a flat sprite that
+                // always turns to face the camera, classic Doom-style) showing a
+                // frothy mug. A short gold beacon rises out of each so you can
+                // still spot them wandering across the arena.
                 for (int i = 0; i < ENEMY_COUNT; i++) {
                     if (!enemies[i].alive) continue;
-                    DrawCube(enemies[i].position,
-                             ENEMY_SIZE, ENEMY_SIZE, ENEMY_SIZE, RED);
-                    DrawCubeWires(enemies[i].position,
-                                  ENEMY_SIZE, ENEMY_SIZE, ENEMY_SIZE, GOLD);
+                    DrawBillboard(camera, beerTex, enemies[i].position,
+                                  ENEMY_SIZE, WHITE);
                     Vector3 top = enemies[i].position;
                     top.y += ENEMY_SIZE / 2.0f;
-                    Vector3 sky = top; sky.y += 5.0f;
-                    DrawLine3D(top, sky, YELLOW);   // beacon
+                    Vector3 sky = top; sky.y += 4.0f;
+                    DrawLine3D(top, sky, GOLD);   // beacon
                 }
 
                 // Shot tracer: a bright line from the gun to the impact point,
@@ -260,30 +310,43 @@ int main(void) {
             EndMode3D();
 
             // ---- Gun viewmodel (2D, drawn over the 3D scene) ----
-            // A simple blaster held in the lower-right, pointing toward the
-            // centre. When you fire it kicks back (recoil) and a flash appears
-            // at the barrel tip. "recoil" slides the whole gun down briefly.
-            float recoil = (muzzleTimer > 0.0f) ? 18.0f * (muzzleTimer / 0.06f) : 0.0f;
-            Vector2 grip   = { SCREEN_WIDTH - 190.0f, SCREEN_HEIGHT - 30.0f + recoil };
-            Vector2 muzzle = { SCREEN_WIDTH / 2.0f + 40.0f,
-                               SCREEN_HEIGHT / 2.0f + 150.0f + recoil };
+            // The shotgun sprite, held in the lower-right and pivoted so the
+            // muzzle points up toward the crosshair. When you fire it kicks back
+            // (recoil slides it down briefly) and a flash blooms at the barrel.
+            float recoil = (muzzleTimer > 0.0f) ? 26.0f * (muzzleTimer / 0.06f) : 0.0f;
 
-            DrawLineEx(grip, muzzle, 36.0f, DARKGRAY);                       // barrel (outer)
-            DrawLineEx(grip, muzzle, 16.0f, GRAY);                          // barrel (highlight)
-            DrawLineEx(grip, (Vector2){ grip.x + 34.0f, grip.y + 130.0f },  // grip / handle
-                       34.0f, (Color){ 45, 45, 55, 255 });
-            DrawCircleV(muzzle, 9.0f, (Color){ 30, 30, 35, 255 });          // barrel opening
+            float gunW = GUN_W;
+            float gunH = gunW * (float)shotgunTex.height / (float)shotgunTex.width;
+
+            // Source rect with a NEGATIVE width flips the sprite horizontally so
+            // the muzzle ends up on the left (pointing toward screen centre).
+            Rectangle gunSrc = { 0.0f, 0.0f,
+                                 -(float)shotgunTex.width, (float)shotgunTex.height };
+            // We pivot around the grip: ORIGIN is that point in sprite space, and
+            // we place it at ANCHOR on screen (nudged down by recoil).
+            Vector2 gunOrigin = { gunW * GUN_ORIGIN_FX, gunH * GUN_ORIGIN_FY };
+            Rectangle gunDst  = { GUN_ANCHOR_X, GUN_ANCHOR_Y + recoil, gunW, gunH };
+            DrawTexturePro(shotgunTex, gunSrc, gunDst, gunOrigin, GUN_ROT, WHITE);
+
+            // Place the muzzle flash at the barrel tip by running the muzzle's
+            // sprite-space point through the SAME pivot/rotation raylib used to
+            // draw the gun (matching DrawTexturePro: rotation about the origin).
+            float rad = GUN_ROT * DEG2RAD, cr = cosf(rad), sr = sinf(rad);
+            float mlx = gunW * GUN_MUZZLE_FX - gunOrigin.x;
+            float mly = gunH * GUN_MUZZLE_FY - gunOrigin.y;
+            Vector2 muzzle = { GUN_ANCHOR_X + mlx * cr - mly * sr,
+                               GUN_ANCHOR_Y + recoil + mlx * sr + mly * cr };
 
             // Muzzle flash: a quick burst of bright shapes right at the tip.
             if (muzzleTimer > 0.0f) {
-                DrawCircleV(muzzle, 30.0f, Fade(ORANGE, 0.85f));
-                DrawCircleV(muzzle, 18.0f, Fade(YELLOW, 0.95f));
-                DrawCircleV(muzzle, 8.0f, WHITE);
+                DrawCircleV(muzzle, 34.0f, Fade(ORANGE, 0.85f));
+                DrawCircleV(muzzle, 20.0f, Fade(YELLOW, 0.95f));
+                DrawCircleV(muzzle, 9.0f, WHITE);
                 // Four little spikes for a star-burst look.
-                DrawLineEx(muzzle, (Vector2){ muzzle.x - 46, muzzle.y }, 5.0f, YELLOW);
-                DrawLineEx(muzzle, (Vector2){ muzzle.x + 46, muzzle.y }, 5.0f, YELLOW);
-                DrawLineEx(muzzle, (Vector2){ muzzle.x, muzzle.y - 46 }, 5.0f, YELLOW);
-                DrawLineEx(muzzle, (Vector2){ muzzle.x, muzzle.y + 46 }, 5.0f, YELLOW);
+                DrawLineEx(muzzle, (Vector2){ muzzle.x - 52, muzzle.y }, 6.0f, YELLOW);
+                DrawLineEx(muzzle, (Vector2){ muzzle.x + 52, muzzle.y }, 6.0f, YELLOW);
+                DrawLineEx(muzzle, (Vector2){ muzzle.x, muzzle.y - 52 }, 6.0f, YELLOW);
+                DrawLineEx(muzzle, (Vector2){ muzzle.x, muzzle.y + 52 }, 6.0f, YELLOW);
             }
 
             // ---- 2D HUD (drawn on top of the 3D scene) ----
@@ -312,9 +375,18 @@ int main(void) {
                      20, SCREEN_HEIGHT - 30, 20, GRAY);
 
         EndDrawing();
+
+        // Screenshot mode: let a few frames settle (so textures are uploaded
+        // and the flash is showing), grab one, then quit.
+        if (shotPath) {
+            muzzleTimer = 0.06f;            // keep the flash lit every frame
+            if (++shotFrame >= 3) { TakeScreenshot(shotPath); break; }
+        }
     }
 
     // ---- Cleanup ----------------------------------------------------------
+    UnloadTexture(beerTex);    // free the GPU textures
+    UnloadTexture(shotgunTex);
     UnloadSound(shootSound);   // free the generated sound buffers
     UnloadSound(hitSound);
     CloseAudioDevice();        // shut down the audio system

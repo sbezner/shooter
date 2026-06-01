@@ -35,9 +35,22 @@ On first launch macOS may ask to allow input monitoring / "Open Anyway"
 - `game.c` — the whole game, one file, heavily commented.
 - `Makefile` — clang build, `-arch arm64`, uses `pkg-config --cflags --libs raylib`
   plus the Cocoa/IOKit/CoreVideo/OpenGL frameworks.
+- `assets/` — `beer.png` (enemy sprite, OpenMoji 🍺, CC BY-SA 4.0) and
+  `shotgun.png` (viewmodel, OpenGameArt "2D Guns", CC0). Loaded with relative
+  paths, so **run the game from the project folder** (`make run` does this).
 - `README.md` — public-facing description.
-- `.gitignore` — ignores the compiled `game` binary and `.DS_Store`.
+- `.gitignore` — ignores the compiled `game` binary, `.DS_Store`, and dev
+  screenshots (`preview.png`, `crop.png`).
 - `HANDOFF.md` — this file.
+
+## Dev tip: offscreen screenshots
+`./game --shot out.png` renders a few frames (a beer parked in front, gun
+firing), writes `out.png`, and exits — without grabbing the mouse. Handy for
+eyeballing the viewmodel. Needs an awake display; if the screen is asleep/locked,
+window creation fails (GLFW "Failed to determine Monitor"). The shotgun's on-
+screen placement is tuned via the `GUN_*` `#define`s at the top of `game.c`; the
+muzzle-flash position is derived from those with the same transform raylib uses
+to draw the sprite, so moving the gun moves the flash automatically.
 
 ## Environment (already set up on this Mac — don't reinstall)
 - **Xcode Command Line Tools** (clang 21, make, git). Was installed *headlessly* via
@@ -56,7 +69,12 @@ git push
 ```
 
 ## Feature history (newest first)
-1. **Gun viewmodel + muzzle flash + recoil** (commit `496607b`) — 2D blaster in the
+1. **Shotgun + beer graphics** — enemies are now camera-facing **beer-mug
+   billboards** (`DrawBillboard`) and the viewmodel is a **shotgun sprite**
+   (`DrawTexturePro`, flipped, pivoted/rotated via the `GUN_*` defines). Added
+   `assets/` (downloaded art), a `--shot` offscreen-screenshot dev mode, and
+   texture load/unload. Replaced the old red cubes and the procedural blaster.
+2. **Gun viewmodel + muzzle flash + recoil** (commit `496607b`) — 2D blaster in the
    lower-right that flashes and kicks when firing.
 2. **Sound effects + patrolling enemies** (commit `c99acb0`) — procedurally generated
    shoot/hit tones via `GenTone()`; enemies move and bounce off the arena bounds.
@@ -66,28 +84,32 @@ git push
 
 ## Code map (game.c)
 - Tunable `#define`s up top: `SCREEN_WIDTH/HEIGHT`, `ARENA_HALF`, `WALL_*`,
-  `ENEMY_COUNT`, `ENEMY_SIZE`.
+  `ENEMY_COUNT`, `ENEMY_SIZE`, plus the shotgun viewmodel block `GUN_W`,
+  `GUN_ROT`, `GUN_ANCHOR_X/Y`, `GUN_ORIGIN_FX/FY`, `GUN_MUZZLE_FX/FY`.
 - `Enemy` struct: `position`, `velocity` (XZ drift), `alive`.
 - `RandFloat()` — random float helper.
 - `RespawnEnemy()` — random position + random heading/speed.
 - `GenTone(startFreq, endFreq, seconds)` — builds a `Sound` from a generated sine
   sweep with a fade-out; no audio files needed.
 - `main()`:
-  - Setup: window, audio device, camera (CAMERA_FIRST_PERSON), `DisableCursor()`,
-    generate `shootSound`/`hitSound`, spawn enemies.
+  - Setup: parse `--shot`, window, audio device, **load `beerTex`/`shotgunTex`**,
+    camera (CAMERA_FIRST_PERSON), `DisableCursor()`, generate sounds, spawn enemies.
   - UPDATE: `UpdateCamera`, move/bounce enemies, handle fire (raycast via
     `GetScreenToWorldRay` + `GetRayCollisionBox`, closest hit wins), set timers,
     play sounds.
-  - DRAW: 3D (floor, walls, enemy cubes + beacons, tracer, grid) → gun viewmodel
-    (2D) → HUD (crosshair/hit-marker, score, FPS, controls).
-  - Cleanup: unload sounds, close audio, `EnableCursor()`, close window.
+  - DRAW: 3D (floor, walls, **beer billboards** + beacons, tracer, grid) →
+    **shotgun viewmodel** (`DrawTexturePro`, flipped) + muzzle flash → HUD
+    (crosshair/hit-marker, score, FPS, controls).
+  - Cleanup: **unload textures**, unload sounds, close audio, `EnableCursor()`,
+    close window.
 
 ## Ideas not yet built
 - **Score-attack mode**: 60s countdown + "Time's up! Score: N — press R to restart"
   game-over screen (teaches game states + restart logic).
 - Enemies that chase the player or shoot back; player health.
 - Different enemy types worth different points.
-- Gun tuning: position/size, flash intensity, fire-rate limit for hold-to-fire.
+- Gun tuning: flash intensity, fire-rate limit for hold-to-fire, a subtle
+  idle sway/bob (position/size/angle are already tunable via the `GUN_*` defines).
 
 ## Notes / gotchas
 - raylib uses `GetScreenToWorldRay` (raylib 5.x); older code/tutorials call it
