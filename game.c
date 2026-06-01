@@ -30,11 +30,10 @@
 #define ENEMY_COUNT    8       // How many target cubes exist at once
 #define ENEMY_SIZE     2.0f    // Cube edge length
 
-// An enemy is just a position in the world plus a "is it alive" flag.
-// (With respawn-on-hit, alive stays true; the flag is here so the design is
-//  easy to extend later, e.g. temporary death animations.)
+// An enemy is a position, a velocity (so it can wander), and an alive flag.
 typedef struct Enemy {
     Vector3 position;
+    Vector3 velocity;   // units per second; only X and Z are used (cubes slide on the floor)
     bool    alive;
 } Enemy;
 
@@ -48,7 +47,8 @@ static float RandFloat(float min, float max) {
 
 // Place an enemy at a random spot inside the arena, kept a little away from the
 // walls so cubes never clip into them. Y is half the cube height so it rests
-// nicely on the floor (the floor sits at y = 0).
+// nicely on the floor (the floor sits at y = 0). Also give it a random heading
+// and speed so it drifts around the arena.
 static void RespawnEnemy(Enemy *e) {
     float edge = ARENA_HALF - 2.0f;              // padding from the walls
     e->position = (Vector3){
@@ -56,12 +56,43 @@ static void RespawnEnemy(Enemy *e) {
         ENEMY_SIZE / 2.0f,
         RandFloat(-edge, edge)
     };
+    float angle = RandFloat(0.0f, 2.0f * PI);    // random compass direction
+    float speed = RandFloat(2.5f, 6.0f);         // units per second
+    e->velocity = (Vector3){ cosf(angle) * speed, 0.0f, sinf(angle) * speed };
     e->alive = true;
+}
+
+// Build a short sound effect from scratch (no audio files needed). We fill a
+// buffer of 16-bit samples with a sine wave whose pitch slides from startFreq
+// to endFreq, fading out over its length, then hand it to raylib as a Sound.
+static Sound GenTone(float startFreq, float endFreq, float seconds) {
+    unsigned int sampleRate = 22050;
+    unsigned int frames     = (unsigned int)(sampleRate * seconds);
+    short *samples = (short *)malloc(frames * sizeof(short));
+    for (unsigned int i = 0; i < frames; i++) {
+        float t    = (float)i / (float)sampleRate;        // seconds elapsed
+        float prog = (float)i / (float)frames;            // 0..1 through the sound
+        float freq = startFreq + (endFreq - startFreq) * prog;
+        float env  = 1.0f - prog;                          // fade out to avoid a click
+        float s    = sinf(2.0f * PI * freq * t) * env * 0.4f;
+        samples[i] = (short)(s * 32767.0f);
+    }
+    Wave wave = { frames, sampleRate, 16, 1, samples };    // 16-bit, mono
+    Sound snd = LoadSoundFromWave(wave);                   // raylib copies the data
+    free(samples);                                         // ...so we can free ours
+    return snd;
 }
 
 int main(void) {
     // ---- Window + camera setup --------------------------------------------
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "raylib FPS — ESC to quit");
+    InitAudioDevice();    // start the audio system so we can play sound effects
+
+    // Build our two sound effects procedurally (no files to ship):
+    //   shoot — a laser "pew" that slides downward in pitch
+    //   hit   — a short bright "blip" that rises, for satisfying feedback
+    Sound shootSound = GenTone(880.0f, 180.0f, 0.12f);
+    Sound hitSound   = GenTone(300.0f, 1200.0f, 0.10f);
 
     // The first-person camera. raylib's UpdateCamera(CAMERA_FIRST_PERSON) does
     // the mouse-look and WASD math for us.
@@ -98,8 +129,22 @@ int main(void) {
         // ===== 1. UPDATE ===================================================
         UpdateCamera(&camera, CAMERA_FIRST_PERSON);
 
+        float dt = GetFrameTime();   // seconds since last frame
+
         // Tick down the shot-feedback timer using real elapsed time.
-        if (shotTimer > 0.0f) shotTimer -= GetFrameTime();
+        if (shotTimer > 0.0f) shotTimer -= dt;
+
+        // Move every enemy by its velocity, and bounce it off the arena bounds
+        // so the cubes patrol around instead of escaping through the walls.
+        float bound = ARENA_HALF - 2.0f;
+        for (int i = 0; i < ENEMY_COUNT; i++) {
+            enemies[i].position.x += enemies[i].velocity.x * dt;
+            enemies[i].position.z += enemies[i].velocity.z * dt;
+            if (enemies[i].position.x >  bound) { enemies[i].position.x =  bound; enemies[i].velocity.x *= -1.0f; }
+            if (enemies[i].position.x < -bound) { enemies[i].position.x = -bound; enemies[i].velocity.x *= -1.0f; }
+            if (enemies[i].position.z >  bound) { enemies[i].position.z =  bound; enemies[i].velocity.z *= -1.0f; }
+            if (enemies[i].position.z < -bound) { enemies[i].position.z = -bound; enemies[i].velocity.z *= -1.0f; }
+        }
 
         // Fire on a fresh left-click OR a fresh spacebar press. "Pressed"
         // (not "Down") means one shot per press instead of continuous fire.
@@ -107,6 +152,7 @@ int main(void) {
                      IsKeyPressed(KEY_SPACE);
 
         if (fired) {
+            PlaySound(shootSound);   // "pew" on every shot
             shotTimer   = 0.12f;     // show tracer/marker for 0.12s
             lastShotHit = false;
             // Build a ray straight out of the camera through screen centre.
@@ -148,6 +194,7 @@ int main(void) {
 
             // Hit something? Score up, respawn it, and end the tracer at the cube.
             if (bestHit >= 0) {
+                PlaySound(hitSound);     // satisfying "blip" on a hit
                 lastShotHit = true;
                 shotEnd = Vector3Add(shot.position,
                                      Vector3Scale(shot.direction, bestDistance));
@@ -238,7 +285,10 @@ int main(void) {
     }
 
     // ---- Cleanup ----------------------------------------------------------
-    EnableCursor();   // Give the cursor back before the window closes.
-    CloseWindow();    // Close the window and free raylib's resources.
+    UnloadSound(shootSound);   // free the generated sound buffers
+    UnloadSound(hitSound);
+    CloseAudioDevice();        // shut down the audio system
+    EnableCursor();            // Give the cursor back before the window closes.
+    CloseWindow();             // Close the window and free raylib's resources.
     return 0;
 }

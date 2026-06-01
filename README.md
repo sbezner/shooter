@@ -13,7 +13,7 @@ A tiny **native** first-person shooter for macOS (Apple Silicon / arm64), writte
 | Left-click / Space | Shoot |
 | ESC | Quit |
 
-Shoot the red cubes (marked with yellow beacons). Each hit scores a point and respawns the cube elsewhere.
+Shoot the red cubes (marked with yellow beacons). They **patrol around the arena**, so aiming takes some skill. Each hit scores a point, plays a sound, and respawns the cube elsewhere. Firing and hitting both have procedurally-generated **sound effects** (no audio files needed).
 
 ## Build & run
 
