@@ -121,6 +121,7 @@ int main(void) {
     bool    lastShotHit = false;         // did the last shot tag a cube?
     Vector3 shotStart   = { 0 };         // tracer start (near the gun)
     Vector3 shotEnd     = { 0 };         // tracer end (the impact point)
+    float   muzzleTimer = 0.0f;          // brief muzzle-flash + recoil countdown
 
     // ---- Main loop --------------------------------------------------------
     // WindowShouldClose() becomes true when you press ESC or close the window.
@@ -131,8 +132,9 @@ int main(void) {
 
         float dt = GetFrameTime();   // seconds since last frame
 
-        // Tick down the shot-feedback timer using real elapsed time.
-        if (shotTimer > 0.0f) shotTimer -= dt;
+        // Tick down the shot-feedback + muzzle-flash timers using real time.
+        if (shotTimer > 0.0f)   shotTimer   -= dt;
+        if (muzzleTimer > 0.0f) muzzleTimer -= dt;
 
         // Move every enemy by its velocity, and bounce it off the arena bounds
         // so the cubes patrol around instead of escaping through the walls.
@@ -154,6 +156,7 @@ int main(void) {
         if (fired) {
             PlaySound(shootSound);   // "pew" on every shot
             shotTimer   = 0.12f;     // show tracer/marker for 0.12s
+            muzzleTimer = 0.06f;     // flash + recoil for a brief moment
             lastShotHit = false;
             // Build a ray straight out of the camera through screen centre.
             // GetScreenToWorldRay maps a 2D screen point to a 3D ray; the exact
@@ -255,6 +258,33 @@ int main(void) {
                 DrawGrid(40, 1.0f);
 
             EndMode3D();
+
+            // ---- Gun viewmodel (2D, drawn over the 3D scene) ----
+            // A simple blaster held in the lower-right, pointing toward the
+            // centre. When you fire it kicks back (recoil) and a flash appears
+            // at the barrel tip. "recoil" slides the whole gun down briefly.
+            float recoil = (muzzleTimer > 0.0f) ? 18.0f * (muzzleTimer / 0.06f) : 0.0f;
+            Vector2 grip   = { SCREEN_WIDTH - 190.0f, SCREEN_HEIGHT - 30.0f + recoil };
+            Vector2 muzzle = { SCREEN_WIDTH / 2.0f + 40.0f,
+                               SCREEN_HEIGHT / 2.0f + 150.0f + recoil };
+
+            DrawLineEx(grip, muzzle, 36.0f, DARKGRAY);                       // barrel (outer)
+            DrawLineEx(grip, muzzle, 16.0f, GRAY);                          // barrel (highlight)
+            DrawLineEx(grip, (Vector2){ grip.x + 34.0f, grip.y + 130.0f },  // grip / handle
+                       34.0f, (Color){ 45, 45, 55, 255 });
+            DrawCircleV(muzzle, 9.0f, (Color){ 30, 30, 35, 255 });          // barrel opening
+
+            // Muzzle flash: a quick burst of bright shapes right at the tip.
+            if (muzzleTimer > 0.0f) {
+                DrawCircleV(muzzle, 30.0f, Fade(ORANGE, 0.85f));
+                DrawCircleV(muzzle, 18.0f, Fade(YELLOW, 0.95f));
+                DrawCircleV(muzzle, 8.0f, WHITE);
+                // Four little spikes for a star-burst look.
+                DrawLineEx(muzzle, (Vector2){ muzzle.x - 46, muzzle.y }, 5.0f, YELLOW);
+                DrawLineEx(muzzle, (Vector2){ muzzle.x + 46, muzzle.y }, 5.0f, YELLOW);
+                DrawLineEx(muzzle, (Vector2){ muzzle.x, muzzle.y - 46 }, 5.0f, YELLOW);
+                DrawLineEx(muzzle, (Vector2){ muzzle.x, muzzle.y + 46 }, 5.0f, YELLOW);
+            }
 
             // ---- 2D HUD (drawn on top of the 3D scene) ----
 
