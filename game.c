@@ -30,6 +30,9 @@
 #define ENEMY_COUNT    8       // How many target beers exist at once
 #define ENEMY_SIZE     2.0f    // Billboard size / hit-box edge length
 
+#define DEMO_FPS       30      // frame rate for the "--record <dir>" demo video
+#define DEMO_SECONDS   10      // length of the recorded demo
+
 // ---- Shotgun viewmodel placement (tuned by eye) ---------------------------
 // The shotgun is a side-view sprite drawn in the lower-right corner, flipped so
 // the muzzle points up-and-left toward the crosshair. These control where it
@@ -48,12 +51,26 @@
 #define GUN_MUZZLE_FX  0.00f
 #define GUN_MUZZLE_FY  0.1207f
 
+// ---- Game feel -------------------------------------------------------------
+#define FIRE_COOLDOWN  0.40f   // min seconds between shots (pump-action cadence)
+#define SHELLS_MAX     6       // shells per load before a reload is needed
+#define RELOAD_TIME    0.90f   // seconds to reload (gun dips out of view)
+#define MAX_PARTICLES  96      // pool size for the beer-splash hit burst
+
 // An enemy is a position, a velocity (so it can wander), and an alive flag.
 typedef struct Enemy {
     Vector3 position;
     Vector3 velocity;   // units per second; only X and Z are used (cubes slide on the floor)
     bool    alive;
 } Enemy;
+
+// A short-lived bit of "beer splash" flung out when a shot connects.
+typedef struct Particle {
+    Vector3 position;
+    Vector3 velocity;
+    float    life;      // seconds of life remaining (<=0 means free/dead)
+    float    maxLife;   // initial life, for fading
+} Particle;
 
 // ---- Helpers ---------------------------------------------------------------
 
@@ -80,6 +97,23 @@ static void RespawnEnemy(Enemy *e) {
     e->alive = true;
 }
 
+// Fling a little burst of beer-splash particles out of an impact point. Reuses
+// dead slots from the fixed pool (no allocation), so it's safe to call freely.
+static void SpawnBurst(Particle *ps, int max, Vector3 at) {
+    int spawned = 0;
+    for (int i = 0; i < max && spawned < 14; i++) {
+        if (ps[i].life > 0.0f) continue;            // slot still in use
+        float ang = RandFloat(0.0f, 2.0f * PI);
+        float out = RandFloat(2.0f, 7.0f);          // outward speed
+        ps[i].position = at;
+        ps[i].velocity = (Vector3){ cosf(ang) * out,
+                                    RandFloat(2.5f, 6.5f),   // pop upward
+                                    sinf(ang) * out };
+        ps[i].maxLife = ps[i].life = RandFloat(0.25f, 0.5f);
+        spawned++;
+    }
+}
+
 // Build a short sound effect from scratch (no audio files needed). We fill a
 // buffer of 16-bit samples with a sine wave whose pitch slides from startFreq
 // to endFreq, fading out over its length, then hand it to raylib as a Sound.
@@ -101,15 +135,50 @@ static Sound GenTone(float startFreq, float endFreq, float seconds) {
     return snd;
 }
 
+// Mix one GenTone-style sweep into a 16-bit mono buffer starting at sample
+// `start`, summing (and clamping) so overlapping sounds add together. Used by
+// the --record demo to synthesise a soundtrack that matches the on-screen shots.
+static void MixTone(short *buf, long len, long start,
+                    float startFreq, float endFreq, float seconds, int sampleRate) {
+    long n = (long)(sampleRate * seconds);
+    for (long i = 0; i < n; i++) {
+        long idx = start + i;
+        if (idx < 0 || idx >= len) continue;
+        float t    = (float)i / (float)sampleRate;
+        float prog = (float)i / (float)n;
+        float freq = startFreq + (endFreq - startFreq) * prog;
+        float env  = 1.0f - prog;
+        float s    = sinf(2.0f * PI * freq * t) * env * 0.4f;
+        int   v    = buf[idx] + (int)(s * 32767.0f);
+        if (v >  32767) v =  32767;
+        if (v < -32768) v = -32768;
+        buf[idx] = (short)v;
+    }
+}
+
+// Unit forward vector for a yaw (around Y, 0 = looking down -Z) and pitch.
+static Vector3 ForwardFromYawPitch(float yaw, float pitch) {
+    return (Vector3){ sinf(yaw) * cosf(pitch),
+                      sinf(pitch),
+                     -cosf(yaw) * cosf(pitch) };
+}
+
 int main(int argc, char **argv) {
     // Optional self-test: "./game --shot out.png" renders a few frames with a
     // beer parked in front and the gun firing, saves a screenshot, then exits.
     // Used during development to tune the viewmodel without grabbing the mouse.
+    // And "./game --record <dir>" plays a scripted auto-aim demo, writing one
+    // PNG per frame plus a synthesised audio.wav into <dir>, then exits — the
+    // raw material for the demo video (see make-video.sh).
     const char *shotPath = NULL;
-    for (int i = 1; i < argc - 1; i++)
-        if (TextIsEqual(argv[i], "--shot")) shotPath = argv[i + 1];
+    const char *recPath  = NULL;
+    for (int i = 1; i < argc - 1; i++) {
+        if (TextIsEqual(argv[i], "--shot"))   shotPath = argv[i + 1];
+        if (TextIsEqual(argv[i], "--record")) recPath  = argv[i + 1];
+    }
 
     // ---- Window + camera setup --------------------------------------------
+    if (recPath) SetTraceLogLevel(LOG_WARNING);   // quiet logs while recording
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "raylib FPS — ESC to quit");
     InitAudioDevice();    // start the audio system so we can play sound effects
 
@@ -140,7 +209,7 @@ int main(int argc, char **argv) {
     // Lock the mouse to the window: the cursor is hidden and recentred each
     // frame so you can spin around endlessly. ESC / EnableCursor() reverses it.
     // (Skip this in screenshot mode so the test run doesn't grab the cursor.)
-    if (!shotPath) DisableCursor();
+    if (!shotPath && !recPath) DisableCursor();
 
     SetTargetFPS(60);                 // Cap the loop at 60 fps
     srand((unsigned int)time(NULL));  // Seed RNG so spawns differ each run
@@ -158,6 +227,17 @@ int main(int argc, char **argv) {
     Vector3 shotEnd     = { 0 };         // tracer end (the impact point)
     float   muzzleTimer = 0.0f;          // brief muzzle-flash + recoil countdown
 
+    // Game-feel state: fire-rate gate, shells + reload, screen shake, gun bob,
+    // and the particle pool for hit splashes.
+    float   fireTimer   = 0.0f;          // time until the next shot is allowed
+    int     shells      = SHELLS_MAX;    // loaded shells; 0 forces a reload
+    float   reloadTimer = 0.0f;          // >0 while reloading (gun is lowered)
+    float   shakeTimer  = 0.0f;          // >0 while the view is shaking
+    float   shakeMag    = 0.0f;          // current shake magnitude (world units)
+    float   bobPhase    = 0.0f;          // advances with movement for the gun bob
+    Vector3 prevCamPos  = camera.position;
+    Particle particles[MAX_PARTICLES] = { 0 };
+
     // Screenshot mode: park a beer right in front of the camera, light up the
     // muzzle flash, and count frames so we can grab one clean frame and quit.
     int shotFrame = 0;
@@ -172,20 +252,63 @@ int main(int argc, char **argv) {
         shotEnd   = enemies[0].position;
     }
 
+    // Demo-recording state. We drive the camera ourselves (yaw/pitch), auto-aim
+    // at beers, and accumulate a soundtrack in recTrack as shots fire.
+    int   recFrame = 0;
+    int   recTotal = DEMO_FPS * DEMO_SECONDS;
+    float yaw = 0.0f, pitch = 0.0f;       // manual look angles for record mode
+    int   recSampleRate = 22050;
+    long  recTrackLen = 0;
+    short *recTrack = NULL;
+    if (recPath) {
+        camera.position = (Vector3){ 0.0f, 2.4f, 7.0f };
+        recTrackLen = (long)recSampleRate * (DEMO_SECONDS + 1);  // +1s of tail
+        recTrack = (short *)calloc(recTrackLen, sizeof(short));
+    }
+
     // ---- Main loop --------------------------------------------------------
     // WindowShouldClose() becomes true when you press ESC or close the window.
-    while (!WindowShouldClose()) {
+    // While recording we instead loop purely on the frame count, so a stray
+    // focus/close event can't cut the demo short before all frames are written.
+    while (recPath ? (recFrame < recTotal) : !WindowShouldClose()) {
 
         // ===== 1. UPDATE ===================================================
         // In screenshot mode we freeze the camera/enemies so the frame is
         // deterministic; otherwise drive the camera from mouse + WASD as usual.
-        if (!shotPath) UpdateCamera(&camera, CAMERA_FIRST_PERSON);
+        if (!shotPath && !recPath) UpdateCamera(&camera, CAMERA_FIRST_PERSON);
 
-        float dt = shotPath ? 0.0f : GetFrameTime();   // seconds since last frame
+        // Fixed timestep when recording (deterministic motion regardless of how
+        // fast frames are actually captured); real elapsed time otherwise.
+        float dt = recPath ? (1.0f / DEMO_FPS) : (shotPath ? 0.0f : GetFrameTime());
 
-        // Tick down the shot-feedback + muzzle-flash timers using real time.
-        if (shotTimer > 0.0f)   shotTimer   -= dt;
+        // Tick down all the short timers.
+        if (shotTimer   > 0.0f) shotTimer   -= dt;
         if (muzzleTimer > 0.0f) muzzleTimer -= dt;
+        if (fireTimer   > 0.0f) fireTimer   -= dt;
+        if (shakeTimer  > 0.0f) shakeTimer  -= dt;
+        bool wasReloading = (reloadTimer > 0.0f);
+        if (reloadTimer > 0.0f) reloadTimer -= dt;
+        if (wasReloading && reloadTimer <= 0.0f) shells = SHELLS_MAX;  // reload finished
+
+        // Start a reload when empty, or on demand with R (when not already at it).
+        bool wantReload = IsKeyPressed(KEY_R) && shells < SHELLS_MAX;
+        if (reloadTimer <= 0.0f && (shells <= 0 || wantReload)) reloadTimer = RELOAD_TIME;
+
+        // Gun bob: advance a phase by how fast the camera is moving (plus a slow
+        // idle drift), so the viewmodel sways while you walk and breathes at rest.
+        float camSpeed = (dt > 0.0f)
+            ? Vector3Length(Vector3Subtract(camera.position, prevCamPos)) / dt : 0.0f;
+        prevCamPos = camera.position;
+        bobPhase += dt * (1.5f + camSpeed * 1.2f);
+
+        // Advance hit particles (simple gravity + fade).
+        for (int i = 0; i < MAX_PARTICLES; i++) {
+            if (particles[i].life <= 0.0f) continue;
+            particles[i].life -= dt;
+            particles[i].velocity.y -= 12.0f * dt;          // gravity
+            particles[i].position = Vector3Add(particles[i].position,
+                                               Vector3Scale(particles[i].velocity, dt));
+        }
 
         // Move every enemy by its velocity, and bounce it off the arena bounds
         // so the cubes patrol around instead of escaping through the walls.
@@ -199,13 +322,60 @@ int main(int argc, char **argv) {
             if (enemies[i].position.z < -bound) { enemies[i].position.z = -bound; enemies[i].velocity.z *= -1.0f; }
         }
 
-        // Fire on a fresh left-click OR a fresh spacebar press. "Pressed"
-        // (not "Down") means one shot per press instead of continuous fire.
-        bool fired = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
-                     IsKeyPressed(KEY_SPACE);
+        // Demo auto-pilot: drift the camera for life, smoothly swing the aim
+        // onto whichever beer is nearest the current view, and fire once the
+        // crosshair is on target (throttled by a cooldown).
+        bool autoFire = false;
+        if (recPath) {
+            float t = recFrame / (float)DEMO_FPS;
+            camera.position.x = 4.0f * sinf(t * 0.25f);
+            camera.position.y = 2.4f + 0.12f * sinf(t * 1.7f);
+            camera.position.z = 7.0f;
+
+            Vector3 fwd = ForwardFromYawPitch(yaw, pitch);
+            int tgt = -1; float bestAng = 1e9f; Vector3 tdir = { 0 };
+            for (int i = 0; i < ENEMY_COUNT; i++) {
+                if (!enemies[i].alive) continue;
+                Vector3 d = Vector3Normalize(Vector3Subtract(enemies[i].position, camera.position));
+                float a = acosf(Clamp(Vector3DotProduct(fwd, d), -1.0f, 1.0f));
+                if (a < bestAng) { bestAng = a; tgt = i; tdir = d; }
+            }
+            if (tgt >= 0) {
+                float desYaw   = atan2f(tdir.x, -tdir.z);
+                float desPitch = asinf(Clamp(tdir.y, -1.0f, 1.0f));
+                float dy = desYaw - yaw;
+                while (dy >  PI) dy -= 2.0f * PI;
+                while (dy < -PI) dy += 2.0f * PI;
+                yaw   += dy * 0.20f;                       // ease toward the target
+                pitch += (desPitch - pitch) * 0.20f;
+            }
+            Vector3 fwd2 = ForwardFromYawPitch(yaw, pitch);
+            camera.target = Vector3Add(camera.position, fwd2);
+
+            if (tgt >= 0) {
+                Vector3 d = Vector3Normalize(Vector3Subtract(enemies[tgt].position, camera.position));
+                float err = acosf(Clamp(Vector3DotProduct(fwd2, d), -1.0f, 1.0f));
+                autoFire = (err < 0.05f);   // aimed; fire-rate + ammo gated below
+            }
+        }
+
+        // The trigger is held (hold to keep firing) via auto-pilot, the mouse,
+        // or space. A shot only happens if the fire-rate cooldown has elapsed,
+        // we have a shell, and we're not mid-reload — so it paces like a pump gun.
+        bool wantFire = autoFire ||
+                        IsMouseButtonDown(MOUSE_BUTTON_LEFT) ||
+                        IsKeyDown(KEY_SPACE);
+        bool fired = wantFire && fireTimer <= 0.0f && shells > 0 && reloadTimer <= 0.0f;
 
         if (fired) {
+            fireTimer = FIRE_COOLDOWN;   // throttle to the pump-action cadence
+            shells--;                    // spend a shell
+            shakeTimer = 0.10f; shakeMag = 0.07f;   // a little kick on every shot
             PlaySound(shootSound);   // "pew" on every shot
+            if (recPath)             // ...and bake it into the demo soundtrack
+                MixTone(recTrack, recTrackLen,
+                        (long)((recFrame / (float)DEMO_FPS) * recSampleRate),
+                        880.0f, 180.0f, 0.12f, recSampleRate);
             shotTimer   = 0.12f;     // show tracer/marker for 0.12s
             muzzleTimer = 0.06f;     // flash + recoil for a brief moment
             lastShotHit = false;
@@ -249,10 +419,16 @@ int main(int argc, char **argv) {
             // Hit something? Score up, respawn it, and end the tracer at the cube.
             if (bestHit >= 0) {
                 PlaySound(hitSound);     // satisfying "blip" on a hit
+                if (recPath)
+                    MixTone(recTrack, recTrackLen,
+                            (long)((recFrame / (float)DEMO_FPS) * recSampleRate),
+                            300.0f, 1200.0f, 0.10f, recSampleRate);
                 lastShotHit = true;
                 shotEnd = Vector3Add(shot.position,
                                      Vector3Scale(shot.direction, bestDistance));
                 score++;
+                shakeTimer = 0.16f; shakeMag = 0.16f;       // bigger jolt on a hit
+                SpawnBurst(particles, MAX_PARTICLES, shotEnd);  // beer-splash burst
                 RespawnEnemy(&enemies[bestHit]);
             } else {
                 // Missed: run the tracer far off into the distance.
@@ -266,7 +442,17 @@ int main(int argc, char **argv) {
             ClearBackground(RAYWHITE);
 
             // ---- 3D world ----
-            BeginMode3D(camera);
+            // Screen shake: jitter a copy of the camera (position + target by the
+            // same offset, so we stay pointed the same way) while shakeTimer runs.
+            Camera drawCam = camera;
+            if (shakeTimer > 0.0f) {
+                Vector3 jit = { RandFloat(-shakeMag, shakeMag),
+                                RandFloat(-shakeMag, shakeMag),
+                                RandFloat(-shakeMag, shakeMag) };
+                drawCam.position = Vector3Add(drawCam.position, jit);
+                drawCam.target   = Vector3Add(drawCam.target, jit);
+            }
+            BeginMode3D(drawCam);
 
                 // Floor: a flat plane centred at the origin.
                 DrawPlane((Vector3){ 0.0f, 0.0f, 0.0f },
@@ -290,7 +476,7 @@ int main(int argc, char **argv) {
                 // still spot them wandering across the arena.
                 for (int i = 0; i < ENEMY_COUNT; i++) {
                     if (!enemies[i].alive) continue;
-                    DrawBillboard(camera, beerTex, enemies[i].position,
+                    DrawBillboard(drawCam, beerTex, enemies[i].position,
                                   ENEMY_SIZE, WHITE);
                     Vector3 top = enemies[i].position;
                     top.y += ENEMY_SIZE / 2.0f;
@@ -302,6 +488,15 @@ int main(int argc, char **argv) {
                 // shown briefly after every shot so firing is always visible.
                 if (shotTimer > 0.0f) {
                     DrawLine3D(shotStart, shotEnd, lastShotHit ? GREEN : ORANGE);
+                }
+
+                // Hit particles: little golden cubes of "beer" that fade as they
+                // arc and fall. Drawn after the world so they sit on top.
+                for (int i = 0; i < MAX_PARTICLES; i++) {
+                    if (particles[i].life <= 0.0f) continue;
+                    float f = particles[i].life / particles[i].maxLife;   // 1..0
+                    DrawCube(particles[i].position, 0.18f, 0.18f, 0.18f,
+                             Fade(GOLD, f));
                 }
 
                 // A faint grid on the floor for a sense of depth/movement.
@@ -322,10 +517,20 @@ int main(int argc, char **argv) {
             // the muzzle ends up on the left (pointing toward screen centre).
             Rectangle gunSrc = { 0.0f, 0.0f,
                                  -(float)shotgunTex.width, (float)shotgunTex.height };
+            // Offsets layered onto the grip anchor: recoil (kick down on a shot),
+            // a reload dip (gun swings out of view and back), and a gentle bob
+            // that sways with movement / breathes at rest.
+            float dipY = (reloadTimer > 0.0f)
+                       ? sinf((1.0f - reloadTimer / RELOAD_TIME) * PI) * 220.0f : 0.0f;
+            float bobX = sinf(bobPhase) * 7.0f;
+            float bobY = sinf(bobPhase * 2.0f) * 5.0f;
+            float ax = GUN_ANCHOR_X + bobX;
+            float ay = GUN_ANCHOR_Y + recoil + dipY + bobY;
+
             // We pivot around the grip: ORIGIN is that point in sprite space, and
-            // we place it at ANCHOR on screen (nudged down by recoil).
+            // we place it at the (offset) anchor on screen.
             Vector2 gunOrigin = { gunW * GUN_ORIGIN_FX, gunH * GUN_ORIGIN_FY };
-            Rectangle gunDst  = { GUN_ANCHOR_X, GUN_ANCHOR_Y + recoil, gunW, gunH };
+            Rectangle gunDst  = { ax, ay, gunW, gunH };
             DrawTexturePro(shotgunTex, gunSrc, gunDst, gunOrigin, GUN_ROT, WHITE);
 
             // Place the muzzle flash at the barrel tip by running the muzzle's
@@ -334,8 +539,8 @@ int main(int argc, char **argv) {
             float rad = GUN_ROT * DEG2RAD, cr = cosf(rad), sr = sinf(rad);
             float mlx = gunW * GUN_MUZZLE_FX - gunOrigin.x;
             float mly = gunH * GUN_MUZZLE_FY - gunOrigin.y;
-            Vector2 muzzle = { GUN_ANCHOR_X + mlx * cr - mly * sr,
-                               GUN_ANCHOR_Y + recoil + mlx * sr + mly * cr };
+            Vector2 muzzle = { ax + mlx * cr - mly * sr,
+                               ay + mlx * sr + mly * cr };
 
             // Muzzle flash: a quick burst of bright shapes right at the tip.
             if (muzzleTimer > 0.0f) {
@@ -366,13 +571,45 @@ int main(int argc, char **argv) {
             if (shotTimer > 0.0f && lastShotHit)
                 DrawText("HIT!", (int)cx + 28, (int)cy - 12, 24, GREEN);
 
-            // Score + FPS readouts.
+            // Score readout (top-left).
             DrawText(TextFormat("Score: %d", score), 20, 20, 30, BLACK);
-            DrawText(TextFormat("FPS: %d", GetFPS()),  20, 56, 20, DARKGRAY);
 
-            // A little control reminder along the bottom.
-            DrawText("WASD move   Mouse look   L-Click / Space shoot   ESC quit",
-                     20, SCREEN_HEIGHT - 30, 20, GRAY);
+            // Shell gauge: one shotgun-shell pip per shell, filled = loaded.
+            for (int s = 0; s < SHELLS_MAX; s++) {
+                Rectangle pip = { 20.0f + s * 24.0f, 60.0f, 18.0f, 28.0f };
+                bool loaded = (s < shells);
+                DrawRectangleRec(pip, loaded ? (Color){ 190, 40, 40, 255 } : Fade(DARKGRAY, 0.4f));
+                DrawRectangle((int)pip.x, (int)(pip.y + pip.height - 9), (int)pip.width, 9,
+                              loaded ? GOLD : Fade(GRAY, 0.5f));               // brass base
+                DrawRectangleLinesEx(pip, 2.0f, BLACK);
+            }
+            if (reloadTimer > 0.0f)
+                DrawText("RELOADING", 20, 94, 22, MAROON);
+
+            if (!recPath) {
+                // Normal play: FPS (top-right) + a control reminder along the bottom.
+                DrawText(TextFormat("FPS: %d", GetFPS()), SCREEN_WIDTH - 110, 20, 20, DARKGRAY);
+                DrawText("WASD move   Mouse look   Hold L-Click / Space fire   R reload   ESC quit",
+                         20, SCREEN_HEIGHT - 30, 20, GRAY);
+            } else {
+                // Recording: a caption bar for sharing, plus a brief intro title.
+                const char *cap = "Native FPS in C + raylib  -  built with Claude Code";
+                int cfs = 26, cw = MeasureText(cap, cfs);
+                DrawRectangle(0, SCREEN_HEIGHT - 50, SCREEN_WIDTH, 50, Fade(BLACK, 0.5f));
+                DrawText(cap, SCREEN_WIDTH / 2 - cw / 2, SCREEN_HEIGHT - 40, cfs, RAYWHITE);
+
+                float t = recFrame / (float)DEMO_FPS;
+                if (t < 1.8f) {                                   // fade out over the last 0.6s
+                    float a = (t < 1.2f) ? 1.0f : (1.8f - t) / 0.6f;
+                    DrawRectangle(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, Fade(BLACK, 0.35f * a));
+                    const char *tt = "Built with Claude Code";
+                    int tfs = 70, tw = MeasureText(tt, tfs);
+                    DrawText(tt, SCREEN_WIDTH / 2 - tw / 2, SCREEN_HEIGHT / 2 - 90, tfs, Fade(RAYWHITE, a));
+                    const char *st = "a native raylib shotgun game, in C";
+                    int sfs = 30, sw = MeasureText(st, sfs);
+                    DrawText(st, SCREEN_WIDTH / 2 - sw / 2, SCREEN_HEIGHT / 2 + 0, sfs, Fade(GOLD, a));
+                }
+            }
 
         EndDrawing();
 
@@ -382,10 +619,27 @@ int main(int argc, char **argv) {
             muzzleTimer = 0.06f;            // keep the flash lit every frame
             if (++shotFrame >= 3) { TakeScreenshot(shotPath); break; }
         }
+
+        // Record mode: save this frame, then when the demo is over write the
+        // accumulated soundtrack as a WAV and stop. (We use LoadImageFromScreen
+        // + ExportImage rather than TakeScreenshot, which rewrites the path
+        // relative to the working dir and so can't target an arbitrary folder.)
+        if (recPath) {
+            Image fb = LoadImageFromScreen();
+            ExportImage(fb, TextFormat("%s/frame_%05d.png", recPath, recFrame));
+            UnloadImage(fb);
+            if (++recFrame >= recTotal) {
+                Wave w = { (unsigned int)recTrackLen, (unsigned int)recSampleRate,
+                           16, 1, recTrack };
+                ExportWave(w, TextFormat("%s/audio.wav", recPath));
+                break;
+            }
+        }
     }
 
     // ---- Cleanup ----------------------------------------------------------
-    UnloadTexture(beerTex);    // free the GPU textures
+    if (recTrack) free(recTrack);  // free the demo soundtrack buffer
+    UnloadTexture(beerTex);        // free the GPU textures
     UnloadTexture(shotgunTex);
     UnloadSound(shootSound);   // free the generated sound buffers
     UnloadSound(hitSound);

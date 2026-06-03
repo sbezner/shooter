@@ -25,10 +25,17 @@ make        # builds the `game` binary
 make run    # build + launch
 ```
 
+## Demo video
+
+`./make-video.sh` records a scripted ~30s auto-aim demo and encodes a shareable
+720p MP4 (H.264/AAC) with **sound** — handy for showing the game off. Needs
+`ffmpeg` (`brew install ffmpeg`) and an awake display.
+
 ## Files
 
 - `game.c` — the entire game (~300 lines, heavily commented)
 - `Makefile` — clang build targeting arm64, links raylib + macOS frameworks
+- `make-video.sh` — records the demo and encodes a shareable MP4 (needs ffmpeg)
 - `assets/` — `beer.png` (the enemy sprite) and `shotgun.png` (the viewmodel)
 
 Run the game from the project folder so it can find `assets/` (this is what

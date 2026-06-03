@@ -5,5 +5,9 @@ game
 preview.png
 crop.png
 
+# Demo output (from `./make-video.sh` / `./game --record <dir>`)
+*.mp4
+frame_*.png
+
 # macOS clutter
 .DS_Store

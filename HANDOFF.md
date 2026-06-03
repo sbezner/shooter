@@ -52,6 +52,15 @@ screen placement is tuned via the `GUN_*` `#define`s at the top of `game.c`; the
 muzzle-flash position is derived from those with the same transform raylib uses
 to draw the sprite, so moving the gun moves the flash automatically.
 
+## Dev tip: demo video
+`./make-video.sh [out.mp4]` builds, runs `./game --record <dir>` (a scripted
+auto-aim demo — drives the camera, locks onto beers, fires, ~30 s), and encodes
+a textable H.264/AAC 720p MP4 with ffmpeg. The demo writes one PNG per frame
+plus a synthesised `audio.wav` (the shoot/hit tones are re-mixed into a track via
+`MixTone()` at each shot's timestamp, so picture and sound stay in sync). Tunables:
+`DEMO_FPS`, `DEMO_SECONDS` in `game.c`. Needs an awake display and `ffmpeg`
+(`brew install ffmpeg`). `*.mp4` is gitignored.
+
 ## Environment (already set up on this Mac — don't reinstall)
 - **Xcode Command Line Tools** (clang 21, make, git). Was installed *headlessly* via
   `softwareupdate` (no GUI click), not the popup.
