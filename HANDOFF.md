@@ -1,7 +1,7 @@
 # HANDOFF — fps-game (raylib native FPS)
 
 A resume guide for this project. Read this first when picking the work back up.
-Last updated: 2026-06-01.
+Last updated: 2026-06-12.
 
 ## What this is
 A tiny **native** first-person shooter for macOS (Apple Silicon / arm64), written
@@ -29,6 +29,7 @@ On first launch macOS may ask to allow input monitoring / "Open Anyway"
 | Mouse | Look |
 | W A S D | Move |
 | Left-click / Space | Shoot |
+| R | Reload (restart when the round is over) |
 | ESC | Quit (unlocks the cursor) |
 
 ## Files
@@ -78,7 +79,14 @@ git push
 ```
 
 ## Feature history (newest first)
-1. **Shotgun + beer graphics** — enemies are now camera-facing **beer-mug
+1. **Score-attack mode + bonus beers** — each round is a 60s countdown
+   (`ROUND_SECONDS`); time's up freezes play behind a "TIME'S UP" overlay with
+   the round score, session best, and "press R to restart". ~22% of respawns
+   (`BONUS_CHANCE`) come back as **golden bonus beers**: smaller (`BONUS_SIZE`),
+   faster, gold-tinted with a RED beacon, worth `BONUS_POINTS` (3). The hit
+   marker now shows the points earned (+1/+3). The countdown is skipped in
+   `--shot`/`--record` modes so the dev tools behave as before.
+2. **Shotgun + beer graphics** — enemies are now camera-facing **beer-mug
    billboards** (`DrawBillboard`) and the viewmodel is a **shotgun sprite**
    (`DrawTexturePro`, flipped, pivoted/rotated via the `GUN_*` defines). Added
    `assets/` (downloaded art), a `--shot` offscreen-screenshot dev mode, and
@@ -93,9 +101,11 @@ git push
 
 ## Code map (game.c)
 - Tunable `#define`s up top: `SCREEN_WIDTH/HEIGHT`, `ARENA_HALF`, `WALL_*`,
-  `ENEMY_COUNT`, `ENEMY_SIZE`, plus the shotgun viewmodel block `GUN_W`,
-  `GUN_ROT`, `GUN_ANCHOR_X/Y`, `GUN_ORIGIN_FX/FY`, `GUN_MUZZLE_FX/FY`.
-- `Enemy` struct: `position`, `velocity` (XZ drift), `alive`.
+  `ENEMY_COUNT`, `ENEMY_SIZE`, game-feel (`FIRE_COOLDOWN`, `SHELLS_MAX`,
+  `RELOAD_TIME`), score attack (`ROUND_SECONDS`, `BONUS_CHANCE`, `BONUS_POINTS`,
+  `BONUS_SIZE`), plus the shotgun viewmodel block `GUN_W`, `GUN_ROT`,
+  `GUN_ANCHOR_X/Y`, `GUN_ORIGIN_FX/FY`, `GUN_MUZZLE_FX/FY`.
+- `Enemy` struct: `position`, `velocity` (XZ drift), `size`, `bonus`, `alive`.
 - `RandFloat()` — random float helper.
 - `RespawnEnemy()` — random position + random heading/speed.
 - `GenTone(startFreq, endFreq, seconds)` — builds a `Sound` from a generated sine
@@ -113,12 +123,11 @@ git push
     close window.
 
 ## Ideas not yet built
-- **Score-attack mode**: 60s countdown + "Time's up! Score: N — press R to restart"
-  game-over screen (teaches game states + restart logic).
 - Enemies that chase the player or shoot back; player health.
-- Different enemy types worth different points.
-- Gun tuning: flash intensity, fire-rate limit for hold-to-fire, a subtle
-  idle sway/bob (position/size/angle are already tunable via the `GUN_*` defines).
+- Persist the best score across runs (write/read a small high-score file).
+- Combo multiplier for consecutive hits without a miss.
+- Gun tuning: flash intensity (position/size/angle are already tunable via the
+  `GUN_*` defines).
 
 ## Notes / gotchas
 - raylib uses `GetScreenToWorldRay` (raylib 5.x); older code/tutorials call it

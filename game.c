@@ -57,10 +57,19 @@
 #define RELOAD_TIME    0.90f   // seconds to reload (gun dips out of view)
 #define MAX_PARTICLES  96      // pool size for the beer-splash hit burst
 
+// ---- Score attack ----------------------------------------------------------
+#define ROUND_SECONDS  60.0f   // length of one score-attack round
+#define BONUS_CHANCE   0.22f   // odds a respawned beer comes back as a bonus beer
+#define BONUS_POINTS   3       // what a bonus beer is worth (normal beers = 1)
+#define BONUS_SIZE     1.25f   // bonus beers are smaller (harder to hit)...
+
 // An enemy is a position, a velocity (so it can wander), and an alive flag.
+// Bonus beers are smaller, faster, and worth more points.
 typedef struct Enemy {
     Vector3 position;
     Vector3 velocity;   // units per second; only X and Z are used (cubes slide on the floor)
+    float   size;       // billboard size / hit-box edge length
+    bool    bonus;      // true = small fast beer worth BONUS_POINTS
     bool    alive;
 } Enemy;
 
@@ -86,13 +95,16 @@ static float RandFloat(float min, float max) {
 // and speed so it drifts around the arena.
 static void RespawnEnemy(Enemy *e) {
     float edge = ARENA_HALF - 2.0f;              // padding from the walls
+    e->bonus = RandFloat(0.0f, 1.0f) < BONUS_CHANCE;
+    e->size  = e->bonus ? BONUS_SIZE : ENEMY_SIZE;
     e->position = (Vector3){
         RandFloat(-edge, edge),
-        ENEMY_SIZE / 2.0f,
+        e->size / 2.0f,
         RandFloat(-edge, edge)
     };
     float angle = RandFloat(0.0f, 2.0f * PI);    // random compass direction
-    float speed = RandFloat(2.5f, 6.0f);         // units per second
+    float speed = e->bonus ? RandFloat(6.0f, 9.5f)    // ...and quicker on their feet
+                           : RandFloat(2.5f, 6.0f);   // units per second
     e->velocity = (Vector3){ cosf(angle) * speed, 0.0f, sinf(angle) * speed };
     e->alive = true;
 }
@@ -219,6 +231,14 @@ int main(int argc, char **argv) {
     for (int i = 0; i < ENEMY_COUNT; i++) RespawnEnemy(&enemies[i]);
     int score = 0;
 
+    // Score-attack state: a round lasts ROUND_SECONDS; when time runs out the
+    // game freezes on a "TIME'S UP" screen until R restarts it. `best` tracks
+    // the highest round score this session. `lastPoints` feeds the +N popup.
+    float timeLeft   = ROUND_SECONDS;
+    bool  gameOver   = false;
+    int   best       = 0;
+    int   lastPoints = 1;
+
     // Shot feedback state. When you fire, we record where the shot landed and
     // start a short countdown so we can draw a tracer + marker for a moment.
     float   shotTimer   = 0.0f;          // seconds of feedback left (>0 = show)
@@ -242,6 +262,8 @@ int main(int argc, char **argv) {
     // muzzle flash, and count frames so we can grab one clean frame and quit.
     int shotFrame = 0;
     if (shotPath) {
+        enemies[0].bonus = false;            // deterministic screenshot
+        enemies[0].size  = ENEMY_SIZE;
         enemies[0].position = (Vector3){ 0.0f, ENEMY_SIZE / 2.0f, 0.0f };
         camera.position = (Vector3){ 0.0f, 2.0f, 7.0f };
         camera.target   = (Vector3){ 0.0f, 1.5f, 0.0f };
@@ -290,9 +312,30 @@ int main(int argc, char **argv) {
         if (reloadTimer > 0.0f) reloadTimer -= dt;
         if (wasReloading && reloadTimer <= 0.0f) shells = SHELLS_MAX;  // reload finished
 
+        // Run the round clock (only during real play — the screenshot and demo
+        // modes have no countdown). Hitting zero ends the round.
+        if (!shotPath && !recPath && !gameOver) {
+            timeLeft -= dt;
+            if (timeLeft <= 0.0f) {
+                timeLeft = 0.0f;
+                gameOver = true;
+                if (score > best) best = score;
+            }
+        }
+
+        // On the game-over screen R restarts a fresh round instead of reloading.
+        if (gameOver && IsKeyPressed(KEY_R)) {
+            for (int i = 0; i < ENEMY_COUNT; i++) RespawnEnemy(&enemies[i]);
+            for (int i = 0; i < MAX_PARTICLES; i++) particles[i].life = 0.0f;
+            score = 0; shells = SHELLS_MAX;
+            shotTimer = muzzleTimer = fireTimer = reloadTimer = shakeTimer = 0.0f;
+            timeLeft = ROUND_SECONDS;
+            gameOver = false;
+        }
+
         // Start a reload when empty, or on demand with R (when not already at it).
-        bool wantReload = IsKeyPressed(KEY_R) && shells < SHELLS_MAX;
-        if (reloadTimer <= 0.0f && (shells <= 0 || wantReload)) reloadTimer = RELOAD_TIME;
+        bool wantReload = !gameOver && IsKeyPressed(KEY_R) && shells < SHELLS_MAX;
+        if (!gameOver && reloadTimer <= 0.0f && (shells <= 0 || wantReload)) reloadTimer = RELOAD_TIME;
 
         // Gun bob: advance a phase by how fast the camera is moving (plus a slow
         // idle drift), so the viewmodel sways while you walk and breathes at rest.
@@ -365,7 +408,8 @@ int main(int argc, char **argv) {
         bool wantFire = autoFire ||
                         IsMouseButtonDown(MOUSE_BUTTON_LEFT) ||
                         IsKeyDown(KEY_SPACE);
-        bool fired = wantFire && fireTimer <= 0.0f && shells > 0 && reloadTimer <= 0.0f;
+        bool fired = !gameOver && wantFire &&
+                     fireTimer <= 0.0f && shells > 0 && reloadTimer <= 0.0f;
 
         if (fired) {
             fireTimer = FIRE_COOLDOWN;   // throttle to the pump-action cadence
@@ -395,7 +439,7 @@ int main(int argc, char **argv) {
                 if (!enemies[i].alive) continue;
 
                 // Axis-aligned bounding box around the cube for ray testing.
-                float h = ENEMY_SIZE / 2.0f;
+                float h = enemies[i].size / 2.0f;
                 BoundingBox box = {
                     (Vector3){ enemies[i].position.x - h,
                                enemies[i].position.y - h,
@@ -426,7 +470,8 @@ int main(int argc, char **argv) {
                 lastShotHit = true;
                 shotEnd = Vector3Add(shot.position,
                                      Vector3Scale(shot.direction, bestDistance));
-                score++;
+                lastPoints = enemies[bestHit].bonus ? BONUS_POINTS : 1;
+                score += lastPoints;
                 shakeTimer = 0.16f; shakeMag = 0.16f;       // bigger jolt on a hit
                 SpawnBurst(particles, MAX_PARTICLES, shotEnd);  // beer-splash burst
                 RespawnEnemy(&enemies[bestHit]);
@@ -474,14 +519,17 @@ int main(int argc, char **argv) {
                 // always turns to face the camera, classic Doom-style) showing a
                 // frothy mug. A short gold beacon rises out of each so you can
                 // still spot them wandering across the arena.
+                // Bonus beers are smaller, faster, tinted gold, and fly a red
+                // beacon — they're worth BONUS_POINTS if you can tag one.
                 for (int i = 0; i < ENEMY_COUNT; i++) {
                     if (!enemies[i].alive) continue;
                     DrawBillboard(drawCam, beerTex, enemies[i].position,
-                                  ENEMY_SIZE, WHITE);
+                                  enemies[i].size,
+                                  enemies[i].bonus ? GOLD : WHITE);
                     Vector3 top = enemies[i].position;
-                    top.y += ENEMY_SIZE / 2.0f;
+                    top.y += enemies[i].size / 2.0f;
                     Vector3 sky = top; sky.y += 4.0f;
-                    DrawLine3D(top, sky, GOLD);   // beacon
+                    DrawLine3D(top, sky, enemies[i].bonus ? RED : GOLD);   // beacon
                 }
 
                 // Shot tracer: a bright line from the gun to the impact point,
@@ -569,10 +617,22 @@ int main(int argc, char **argv) {
             DrawLineEx((Vector2){ cx, cy - arm }, (Vector2){ cx, cy + arm }, thick, cross); // vertical
             DrawCircleV((Vector2){ cx, cy }, 2.5f, cross);   // centre dot
             if (shotTimer > 0.0f && lastShotHit)
-                DrawText("HIT!", (int)cx + 28, (int)cy - 12, 24, GREEN);
+                DrawText(TextFormat("+%d", lastPoints), (int)cx + 28, (int)cy - 12, 24,
+                         lastPoints > 1 ? GOLD : GREEN);
 
-            // Score readout (top-left).
+            // Score readout (top-left); session best lives under the FPS counter.
             DrawText(TextFormat("Score: %d", score), 20, 20, 30, BLACK);
+            if (best > 0)
+                DrawText(TextFormat("Best: %d", best), SCREEN_WIDTH - 110, 50, 20, DARKGRAY);
+
+            // Round timer (top-centre); turns red for the last 10 seconds.
+            if (!shotPath && !recPath) {
+                int secs = (int)ceilf(timeLeft);
+                const char *clock = TextFormat("%d:%02d", secs / 60, secs % 60);
+                int cw2 = MeasureText(clock, 40);
+                DrawText(clock, SCREEN_WIDTH / 2 - cw2 / 2, 16, 40,
+                         (timeLeft <= 10.0f && !gameOver) ? RED : BLACK);
+            }
 
             // Shell gauge: one shotgun-shell pip per shell, filled = loaded.
             for (int s = 0; s < SHELLS_MAX; s++) {
@@ -585,6 +645,20 @@ int main(int argc, char **argv) {
             }
             if (reloadTimer > 0.0f)
                 DrawText("RELOADING", 20, 94, 22, MAROON);
+
+            // Game over: dim the world and show the round result until R.
+            if (gameOver) {
+                DrawRectangle(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, Fade(BLACK, 0.55f));
+                const char *go = "TIME'S UP!";
+                int gfs = 70, gw = MeasureText(go, gfs);
+                DrawText(go, SCREEN_WIDTH / 2 - gw / 2, SCREEN_HEIGHT / 2 - 120, gfs, RAYWHITE);
+                const char *sc = TextFormat("Score: %d    Best: %d", score, best);
+                int sfs2 = 40, sw2 = MeasureText(sc, sfs2);
+                DrawText(sc, SCREEN_WIDTH / 2 - sw2 / 2, SCREEN_HEIGHT / 2 - 20, sfs2, GOLD);
+                const char *rr = "Press R to restart";
+                int rfs = 30, rw = MeasureText(rr, rfs);
+                DrawText(rr, SCREEN_WIDTH / 2 - rw / 2, SCREEN_HEIGHT / 2 + 50, rfs, RAYWHITE);
+            }
 
             if (!recPath) {
                 // Normal play: FPS (top-right) + a control reminder along the bottom.

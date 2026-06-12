@@ -11,9 +11,10 @@ A tiny **native** first-person shooter for macOS (Apple Silicon / arm64), writte
 | Mouse | Look |
 | W A S D | Move |
 | Left-click / Space | Shoot |
+| R | Reload (or restart after time's up) |
 | ESC | Quit |
 
-Shoot the **beers** (frothy mugs, marked with gold beacons). They **patrol around the arena** as camera-facing billboards, so aiming takes some skill. Each hit scores a point, plays a sound, and respawns the beer elsewhere. A **shotgun viewmodel** sits in your view and flashes + recoils when you fire. Firing and hitting both have procedurally-generated **sound effects** (no audio files needed).
+It's a **60-second score attack**: shoot as many **beers** (frothy mugs, marked with gold beacons) as you can before the clock runs out, then press **R** to chase your session best. The beers **patrol around the arena** as camera-facing billboards, so aiming takes some skill. Keep an eye out for **golden bonus beers** — smaller, faster, flying a red beacon, and worth **3 points** instead of 1. Each hit pops a score popup, plays a sound, and respawns the beer elsewhere. A **shotgun viewmodel** sits in your view and flashes + recoils when you fire (six shells, then a pump-action reload). Firing and hitting both have procedurally-generated **sound effects** (no audio files needed).
 
 ## Build & run
 
